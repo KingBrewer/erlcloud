@@ -24,8 +24,12 @@
          list_tags/1, list_tags/2,
          remove_tags/2, remove_tags/3]).
 
+%% CloudSearch Document Upload API
+-export([documents_upload/2, documents_upload/3]).
+
 %% CloudSearch Utils API
 -export([create_tag_list/1,
+         flatten_index_field/1,
          date_field_options/1, date_field_options/7,
          date_array_field_options/1, date_array_field_options/6,
          double_field_options/1, double_field_options/7,
@@ -51,8 +55,8 @@
 -type cloudsearch_return_val() :: {ok, proplists:proplist()} | {error, term()}.
 -type cloudsearch_domain_tag() :: [{TagKey :: binary(), TagValue :: string()}].
 -type cloudsearch_index_field_option() :: {
-        OptionName :: string(),
-        OptionValue :: boolean() | string() | null | integer() | float()
+        OptionName :: string() | binary(),
+        OptionValue :: boolean() | string() | null | integer() | float() | list()
 }.
 -type cloudsearch_index_field() :: [cloudsearch_index_field_option()].
 
@@ -62,6 +66,7 @@
               cloudsearch_index_field/0]).
 
 -define(API_VERSION, '2013-01-01').
+-define(SERVICE_NAME, "cloudsearch").
 
 %%==============================================================================
 %% Library initialization
@@ -195,7 +200,8 @@ define_index_fields(DomainName, IndexFields) ->
                           Config :: aws_config()) ->
     cloudsearch_return_val().
 define_index_fields(DomainName, IndexFields, #aws_config{} = Config) ->
-    IndexFieldParams = erlcloud_aws:param_list(IndexFields, "IndexFields.IndexField"),
+    NormFields = [flatten_index_field(Field) || Field <- IndexFields],
+    IndexFieldParams = erlcloud_aws:param_list(NormFields, "IndexFields.IndexField"),
     cloudsearch_query(Config, "DefineIndexFields", [{"DomainName", DomainName} |
                                                     IndexFieldParams]).
 
@@ -350,6 +356,30 @@ remove_tags(DomainARN, TagKeys, #aws_config{} = Config) ->
     cloudsearch_query(Config, "RemoveTags", [{"ARN", DomainARN} | Params]).
 
 %%==============================================================================
+%% CloudSearch Document Upload API
+%%==============================================================================
+
+%%------------------------------------------------------------------------------
+%% Documents/batch upload
+%%
+%% http://docs.aws.amazon.com/cloudsearch/latest/developerguide/documents-batch-resource.html
+%%------------------------------------------------------------------------------
+-spec documents_upload(DocEndpointUrl :: string(),
+                       Documents :: proplists:proplist()) ->
+    cloudsearch_return_val().
+documents_upload(DocEndpointURL, Documents) ->
+    documents_upload(DocEndpointURL, Documents, default_config()).
+
+-spec documents_upload(DocEndpointUrl :: string(),
+                       Documents :: proplists:proplist(),
+                       Config :: aws_config()) ->
+    cloudsearch_return_val().
+documents_upload(DocEndpointURL, Documents, #aws_config{} = Config) ->
+    Path = "/" ++ atom_to_list(?API_VERSION) ++ "/documents/batch",
+    cloudsearch_post_json(DocEndpointURL, Path, jsx:encode(Documents), Config).
+
+
+%%==============================================================================
 %% CloudSearch Utils API
 %%==============================================================================
 
@@ -357,6 +387,14 @@ remove_tags(DomainARN, TagKeys, #aws_config{} = Config) ->
     [cloudsearch_domain_tag()].
 create_tag_list(TagList) ->
     [ [{<<"Key">>, Key}, {<<"Value">>, Value}] || {Key, Value} <- TagList ].
+
+%% Converts index field structure to flat proplist required by
+%% AWS DefineIndexField API.
+-spec flatten_index_field(IndexField :: cloudsearch_index_field()) ->
+    proplists:proplist().
+flatten_index_field(IndexField) ->
+    lists:sort(lists:flatten([normalize(Key, Value) ||
+                                    {Key, Value} <- IndexField])).
 
 %%------------------------------------------------------------------------------
 %% Index field: DateOptions
@@ -379,12 +417,13 @@ date_field_options(FieldName, DefaultValue, FacetEnabled, ReturnEnabled,
                    SearchEnabled, SortEnabled, SourceField) ->
     [{"IndexFieldName", FieldName},
      {"IndexFieldType", "date"},
-     {"DateOptions.DefaultValue", DefaultValue},
-     {"DateOptions.FacetEnabled", FacetEnabled},
-     {"DateOptions.ReturnEnabled", ReturnEnabled},
-     {"DateOptions.SearchEnabled", SearchEnabled},
-     {"DateOptions.SortEnabled", SortEnabled},
-     {"DateOptions.SourceField", SourceField}].
+     {"DateOptions",
+        [{"DefaultValue", DefaultValue},
+         {"FacetEnabled", FacetEnabled},
+         {"ReturnEnabled", ReturnEnabled},
+         {"SearchEnabled", SearchEnabled},
+         {"SortEnabled", SortEnabled},
+         {"SourceField", SourceField}]}].
 
 %%------------------------------------------------------------------------------
 %% Index field: DateArrayOptions
@@ -406,11 +445,12 @@ date_array_field_options(FieldName, DefaultValue, FacetEnabled, ReturnEnabled,
                          SearchEnabled, SourceFields) ->
     [{"IndexFieldName", FieldName},
      {"IndexFieldType", "date-array"},
-     {"DateArrayOptions.DefaultValue", DefaultValue},
-     {"DateArrayOptions.FacetEnabled", FacetEnabled},
-     {"DateArrayOptions.ReturnEnabled", ReturnEnabled},
-     {"DateArrayOptions.SearchEnabled", SearchEnabled},
-     {"DateArrayOptions.SourceFields", SourceFields}].
+     {"DateArrayOptions",
+        [{"DefaultValue", DefaultValue},
+         {"FacetEnabled", FacetEnabled},
+         {"ReturnEnabled", ReturnEnabled},
+         {"SearchEnabled", SearchEnabled},
+         {"SourceFields", SourceFields}]}].
 
 %%------------------------------------------------------------------------------
 %% Index field: DoubleOptions
@@ -420,8 +460,7 @@ date_array_field_options(FieldName, DefaultValue, FacetEnabled, ReturnEnabled,
 -spec double_field_options(FieldName :: string()) -> cloudsearch_index_field().
 double_field_options(FieldName) ->
     [{"IndexFieldName", FieldName},
-     {"IndexFieldType", "double"},
-     {"DoubleOptions.DefaultValue", 0.0}].
+     {"IndexFieldType", "double"}].
 
 -spec double_field_options(FieldName :: string(),
                            DefaultValue :: float(),
@@ -434,12 +473,13 @@ double_field_options(FieldName, DefaultValue, FacetEnabled, ReturnEnabled,
                      SearchEnabled, SortEnabled, SourceField) ->
     [{"IndexFieldName", FieldName},
      {"IndexFieldType", "double"},
-     {"DoubleOptions.DefaultValue", DefaultValue},
-     {"DoubleOptions.FacetEnabled", FacetEnabled},
-     {"DoubleOptions.ReturnEnabled", ReturnEnabled},
-     {"DoubleOptions.SearchEnabled", SearchEnabled},
-     {"DoubleOptions.SortEnabled", SortEnabled},
-     {"DoubleOptions.SourceField", SourceField}].
+     {"DoubleOptions",
+        [{"DefaultValue", DefaultValue},
+         {"FacetEnabled", FacetEnabled},
+         {"ReturnEnabled", ReturnEnabled},
+         {"SearchEnabled", SearchEnabled},
+         {"SortEnabled", SortEnabled},
+         {"SourceField", SourceField}]}].
 
 %%------------------------------------------------------------------------------
 %% Index field: DoubleArrayOptions
@@ -449,8 +489,7 @@ double_field_options(FieldName, DefaultValue, FacetEnabled, ReturnEnabled,
 -spec double_array_field_options(FieldName :: string()) -> cloudsearch_index_field().
 double_array_field_options(FieldName) ->
     [{"IndexFieldName", FieldName},
-     {"IndexFieldType", "double-array"},
-     {"DoubleArrayOptions.DefaultValue", 0.0}].
+     {"IndexFieldType", "double-array"}].
 
 -spec double_array_field_options(FieldName :: string(),
                                  DefaultValue :: float(),
@@ -462,11 +501,12 @@ double_array_field_options(FieldName, DefaultValue, FacetEnabled, ReturnEnabled,
                            SearchEnabled, SourceFields) ->
     [{"IndexFieldName", FieldName},
      {"IndexFieldType", "double-array"},
-     {"DoubleArrayOptions.DefaultValue", DefaultValue},
-     {"DoubleArrayOptions.FacetEnabled", FacetEnabled},
-     {"DoubleArrayOptions.ReturnEnabled", ReturnEnabled},
-     {"DoubleArrayOptions.SearchEnabled", SearchEnabled},
-     {"DoubleArrayOptions.SourceFields", SourceFields}].
+     {"DoubleArrayOptions",
+        [{"DefaultValue", DefaultValue},
+         {"FacetEnabled", FacetEnabled},
+         {"ReturnEnabled", ReturnEnabled},
+         {"SearchEnabled", SearchEnabled},
+         {"SourceFields", SourceFields}]}].
 
 %%------------------------------------------------------------------------------
 %% Index field: IntOptions
@@ -476,8 +516,7 @@ double_array_field_options(FieldName, DefaultValue, FacetEnabled, ReturnEnabled,
 -spec int_field_options(FieldName :: string()) -> cloudsearch_index_field().
 int_field_options(FieldName) ->
     [{"IndexFieldName", FieldName},
-     {"IndexFieldType", "int"},
-     {"IntOptions.DefaultValue", 0}].
+     {"IndexFieldType", "int"}].
 
 -spec int_field_options(FieldName :: string(),
                         DefaultValue :: integer(),
@@ -490,12 +529,13 @@ int_field_options(FieldName, DefaultValue, FacetEnabled, ReturnEnabled,
                   SearchEnabled, SortEnabled, SourceField) ->
     [{"IndexFieldName", FieldName},
      {"IndexFieldType", "int"},
-     {"IntOptions.DefaultValue", DefaultValue},
-     {"IntOptions.FacetEnabled", FacetEnabled},
-     {"IntOptions.ReturnEnabled", ReturnEnabled},
-     {"IntOptions.SearchEnabled", SearchEnabled},
-     {"IntOptions.SortEnabled", SortEnabled},
-     {"IntOptions.SourceField", SourceField}].
+     {"IntOptions",
+        [{"DefaultValue", DefaultValue},
+         {"FacetEnabled", FacetEnabled},
+         {"ReturnEnabled", ReturnEnabled},
+         {"SearchEnabled", SearchEnabled},
+         {"SortEnabled", SortEnabled},
+         {"SourceField", SourceField}]}].
 
 %%------------------------------------------------------------------------------
 %% Index field: IntArrayOptions
@@ -505,8 +545,7 @@ int_field_options(FieldName, DefaultValue, FacetEnabled, ReturnEnabled,
 -spec int_array_field_options(FieldName :: string()) -> cloudsearch_index_field().
 int_array_field_options(FieldName) ->
     [{"IndexFieldName", FieldName},
-     {"IndexFieldType", "int-array"},
-     {"IntArrayOptions.DefaultValue", 0}].
+     {"IndexFieldType", "int-array"}].
 
 -spec int_array_field_options(FieldName :: string(),
                               DefaultValue :: integer(),
@@ -518,11 +557,12 @@ int_array_field_options(FieldName, DefaultValue, FacetEnabled, ReturnEnabled,
                         SearchEnabled, SourceFields) ->
     [{"IndexFieldName", FieldName},
      {"IndexFieldType", "int-array"},
-     {"IntArrayOptions.DefaultValue", DefaultValue},
-     {"IntArrayOptions.FacetEnabled", FacetEnabled},
-     {"IntArrayOptions.ReturnEnabled", ReturnEnabled},
-     {"IntArrayOptions.SearchEnabled", SearchEnabled},
-     {"IntArrayOptions.SourceFields", SourceFields}].
+     {"IntArrayOptions",
+        [{"DefaultValue", DefaultValue},
+         {"FacetEnabled", FacetEnabled},
+         {"ReturnEnabled", ReturnEnabled},
+         {"SearchEnabled", SearchEnabled},
+         {"SourceFields", SourceFields}]}].
 
 %%------------------------------------------------------------------------------
 %% Index field: LatLonOptions
@@ -545,12 +585,13 @@ latlon_field_options(FieldName, DefaultValue, FacetEnabled, ReturnEnabled,
                      SearchEnabled, SortEnabled, SourceField) ->
     [{"IndexFieldName", FieldName},
      {"IndexFieldType", "latlon"},
-     {"LatLonOptions.DefaultValue", DefaultValue},
-     {"LatLonOptions.FacetEnabled", FacetEnabled},
-     {"LatLonOptions.ReturnEnabled", ReturnEnabled},
-     {"LatLonOptions.SearchEnabled", SearchEnabled},
-     {"LatLonOptions.SortEnabled", SortEnabled},
-     {"LatLonOptions.SourceField", SourceField}].
+     {"LatLonOptions",
+        [{"DefaultValue", DefaultValue},
+         {"FacetEnabled", FacetEnabled},
+         {"ReturnEnabled", ReturnEnabled},
+         {"SearchEnabled", SearchEnabled},
+         {"SortEnabled", SortEnabled},
+         {"SourceField", SourceField}]}].
 
 %%------------------------------------------------------------------------------
 %% Index field: LiteralOptions
@@ -573,12 +614,13 @@ literal_field_options(FieldName, DefaultValue, FacetEnabled, ReturnEnabled,
                       SearchEnabled, SortEnabled, SourceField) ->
     [{"IndexFieldName", FieldName},
      {"IndexFieldType", "literal"},
-     {"LiteralOptions.DefaultValue", DefaultValue},
-     {"LiteralOptions.FacetEnabled", FacetEnabled},
-     {"LiteralOptions.ReturnEnabled", ReturnEnabled},
-     {"LiteralOptions.SearchEnabled", SearchEnabled},
-     {"LiteralOptions.SortEnabled", SortEnabled},
-     {"LiteralOptions.SourceField", SourceField}].
+     {"LiteralOptions",
+        [{"DefaultValue", DefaultValue},
+         {"FacetEnabled", FacetEnabled},
+         {"ReturnEnabled", ReturnEnabled},
+         {"SearchEnabled", SearchEnabled},
+         {"SortEnabled", SortEnabled},
+         {"SourceField", SourceField}]}].
 
 %%------------------------------------------------------------------------------
 %% Index field: LiteralArrayOptions
@@ -600,11 +642,12 @@ literal_array_field_options(FieldName, DefaultValue, FacetEnabled, ReturnEnabled
                             SearchEnabled, SourceFields) ->
     [{"IndexFieldName", FieldName},
      {"IndexFieldType", "literal-array"},
-     {"LiteralArrayOptions.DefaultValue", DefaultValue},
-     {"LiteralArrayOptions.FacetEnabled", FacetEnabled},
-     {"LiteralArrayOptions.ReturnEnabled", ReturnEnabled},
-     {"LiteralArrayOptions.SearchEnabled", SearchEnabled},
-     {"LiteralArrayOptions.SourceFields", SourceFields}].
+     {"LiteralArrayOptions",
+        [{"DefaultValue", DefaultValue},
+         {"FacetEnabled", FacetEnabled},
+         {"ReturnEnabled", ReturnEnabled},
+         {"SearchEnabled", SearchEnabled},
+         {"SourceFields", SourceFields}]}].
 
 %%------------------------------------------------------------------------------
 %% Index field: TextOptions
@@ -627,12 +670,13 @@ text_field_options(FieldName, AnalysisScheme, DefaultValue, HighlightEnabled,
                    ReturnEnabled, SortEnabled, SourceField) ->
     [{"IndexFieldName", FieldName},
      {"IndexFieldType", "text"},
-     {"TextOptions.AnalysisScheme", AnalysisScheme},
-     {"TextOptions.DefaultValue", DefaultValue},
-     {"TextOptions.HighlightEnabled", HighlightEnabled},
-     {"TextOptions.ReturnEnabled", ReturnEnabled},
-     {"TextOptions.SortEnabled", SortEnabled},
-     {"TextOptions.SourceField", SourceField}].
+     {"TextOptions",
+        [{"AnalysisScheme", AnalysisScheme},
+         {"DefaultValue", DefaultValue},
+         {"HighlightEnabled", HighlightEnabled},
+         {"ReturnEnabled", ReturnEnabled},
+         {"SortEnabled", SortEnabled},
+         {"SourceField", SourceField}]}].
 
 %%------------------------------------------------------------------------------
 %% Index field: TextArrayOptions
@@ -654,11 +698,12 @@ text_array_field_options(FieldName, AnalysisScheme, DefaultValue,
                          HighlightEnabled, ReturnEnabled, SourceFields) ->
     [{"IndexFieldName", FieldName},
      {"IndexFieldType", "text-array"},
-     {"TextArrayOptions.AnalysisScheme", AnalysisScheme},
-     {"TextArrayOptions.DefaultValue", DefaultValue},
-     {"TextArrayOptions.HighlightEnabled", HighlightEnabled},
-     {"TextArrayOptions.ReturnEnabled", ReturnEnabled},
-     {"TextArrayOptions.SourceFields", SourceFields}].
+     {"TextArrayOptions",
+        [{"AnalysisScheme", AnalysisScheme},
+         {"DefaultValue", DefaultValue},
+         {"HighlightEnabled", HighlightEnabled},
+         {"ReturnEnabled", ReturnEnabled},
+         {"SourceFields", SourceFields}]}].
 
 %%==============================================================================
 %% Internal Functions
@@ -671,13 +716,45 @@ cloudsearch_query(Config, Action, Params, ApiVersion) ->
     QParams = [{"Action", Action}, {"Version", ApiVersion}|Params],
     case erlcloud_aws:aws_request4(post, undefined,
                                    Config#aws_config.cloudsearch_host,
-                                   undefined, "/", QParams, "cloudsearch",
-                                   [{"Accept", "application/json"}], Config) of
+                                   Config#aws_config.cloudsearch_port,
+                                   "/", QParams, ?SERVICE_NAME,
+                                   [{"Accept", "application/json"}],
+                                   Config) of
     {ok, Response} ->
         {ok, jsx:decode(Response)};
     {error, Reason} ->
         {error, Reason}
     end.
 
+cloudsearch_post_json(Host, Path, Body,
+             #aws_config{cloudsearch_scheme = Scheme,
+                         cloudsearch_port = Port} = Config) ->
+    Headers = headers(Body, Host, Path, Config),
+
+    case erlcloud_aws:aws_request_form_raw(
+            post, Scheme, Host, Port, Path, Body,
+            [{"content-type", "application/json"} | Headers],
+            Config) of
+       {ok, RespBody} ->
+            {ok, jsx:decode(RespBody)};
+       {error, Reason} ->
+            {error, Reason}
+    end.
+
+-spec headers(binary(), string(), string(), aws_config()) -> [{string(), string()}].
+headers(Body, DocEndpointUrl, Path, #aws_config{} = Config) ->
+    Headers = [{"host", DocEndpointUrl}],
+    erlcloud_aws:sign_v4(post, Path, Config, Headers, Body,
+                         erlcloud_aws:aws_region_from_host(Config#aws_config.cloudsearch_host),
+                         ?SERVICE_NAME, []).
+
 get_tag_params(TagList) ->
     erlcloud_aws:param_list(TagList, "TagList.member").
+
+normalize(_Key, null) ->
+    [];
+normalize(Key, [{_,_},_|_] = PropList) ->
+    [normalize(<<Key/binary, $., SubKey/binary>>, Value) ||
+            {SubKey, Value} <- PropList];
+normalize(Key, Value) ->
+    {Key, Value}.
