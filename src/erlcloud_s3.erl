@@ -22,6 +22,7 @@
          explore_dirstructure/3, explore_dirstructure/4,
          delete_object/2, delete_object/3,
          delete_object_version/3, delete_object_version/4,
+         head_object/2, head_object/3, head_object/4,
          get_object/2, get_object/3, get_object/4,
          get_object_acl/2, get_object_acl/3, get_object_acl/4,
          get_object_torrent/2, get_object_torrent/3,
@@ -40,7 +41,10 @@
          list_bucket_inventory/1, list_bucket_inventory/2, list_bucket_inventory/3,
          get_bucket_inventory/2, get_bucket_inventory/3,
          put_bucket_inventory/2, put_bucket_inventory/3,
-         delete_bucket_inventory/2, delete_bucket_inventory/3
+         delete_bucket_inventory/2, delete_bucket_inventory/3,
+         put_bucket_encryption/2, put_bucket_encryption/3, put_bucket_encryption/4,
+         get_bucket_encryption/1, get_bucket_encryption/2,
+         delete_bucket_encryption/1, delete_bucket_encryption/2
     ]).
 
 -ifdef(TEST).
@@ -283,35 +287,41 @@ check_bucket_access(BucketName, Config)
     end.
 
 
--spec delete_objects_batch(string(), list()) -> erlcloud_aws:httpc_result() | no_return().
-delete_objects_batch(Bucket, KeyList) ->
-    delete_objects_batch(Bucket, KeyList, default_config()).
+-spec delete_objects_batch(string(), list()) -> proplist() | no_return().
+delete_objects_batch(BucketName, KeyList) ->
+    delete_objects_batch(BucketName, KeyList, default_config()).
 
--spec delete_objects_batch(string(), list(), aws_config()) -> erlcloud_aws:httpc_result() | no_return().
-delete_objects_batch(Bucket, KeyList, Config) ->
+-spec delete_objects_batch(string(), list(), aws_config()) -> proplist() | no_return().
+delete_objects_batch(BucketName, KeyList, Config)
+    when is_list(BucketName), is_list(KeyList) ->
     Data = lists:map(fun(Item) ->
-            lists:concat(["<Object><Key>", Item, "</Key></Object>"]) end,
-                KeyList),
+      lists:concat(["<Object><Key>", Item, "</Key></Object>"]) end,
+      KeyList),
     Payload = unicode:characters_to_list(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Delete>" ++ Data ++ "</Delete>",
-                utf8),
+      "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Delete>" ++ Data ++ "</Delete>",
+      utf8),
+    Headers = [{"content-md5", base64:encode(erlcloud_util:md5(Payload))},
+      {"content-length", integer_to_list(string:len(Payload))},
+      {"content-type", "application/xml"}],
+    Doc =  s3_xml_request(Config, post, BucketName, [$/], "delete", [], Payload, Headers),
+    Attributes = [{deleted, "Deleted", fun extract_delete_objects_batch_key_contents/1},
+      {error, "Error", fun extract_delete_objects_batch_err_contents/1}],
+    erlcloud_xml:decode(Attributes, Doc).
 
-    Len = integer_to_list(string:len(Payload)),
-    Url = lists:flatten([Config#aws_config.s3_scheme,
-                Bucket, ".", Config#aws_config.s3_host, port_spec(Config), "/?delete"]),
-    Host = Bucket ++ "." ++ Config#aws_config.s3_host,
-    ContentMD5 = base64:encode(erlcloud_util:md5(Payload)),
-    Headers = [{"host", Host},
-               {"content-md5", binary_to_list(ContentMD5)},
-               {"content-length", Len}],
-    Result = erlcloud_httpc:request(
-        Url, "POST", Headers, Payload, delete_objects_batch_timeout(Config), Config),
-    erlcloud_aws:http_headers_body(Result).
 
-delete_objects_batch_timeout(#aws_config{timeout = undefined}) ->
-    1000;
-delete_objects_batch_timeout(#aws_config{timeout = Timeout}) ->
-    Timeout.
+extract_delete_objects_batch_key_contents(Nodes) ->
+    Attributes = [{key, "Key", text}],
+    [Key || X <- [erlcloud_xml:decode(Attributes, Node) || Node <- Nodes], {_,Key} <- X].
+
+extract_delete_objects_batch_err_contents(Nodes) ->
+    Attributes = [
+      {key, "Key", text},
+      {code, "Code", text},
+      {message, "Message", text}],
+    [to_flat_format(erlcloud_xml:decode(Attributes, Node)) || Node <- Nodes].
+
+to_flat_format([{key,Key},{code,Code},{message,Message}]) ->
+    {Key,Code,Message}.
 
 % returns paths list from AWS S3 root directory, used as input to delete_objects_batch
 % example :
@@ -742,6 +752,24 @@ decode_permission("WRITE_ACP")    -> write_acp;
 decode_permission("READ")         -> read;
 decode_permission("READ_ACP")     -> read_acp.
 
+-spec head_object(string(), string()) -> proplist() | no_return().
+
+head_object(BucketName, Key) ->
+    head_object(BucketName, Key, []).
+
+-spec head_object(string(), string(), proplist() | aws_config()) -> proplist() | no_return().
+
+head_object(BucketName, Key, Config)
+  when is_record(Config, aws_config) ->
+    head_object(BucketName, Key, [], Config);
+head_object(BucketName, Key, Options) ->
+    head_object(BucketName, Key, Options, default_config()).
+
+-spec head_object(string(), string(), proplist(), aws_config()) -> proplist() | no_return().
+
+head_object(BucketName, Key, Options, Config) ->
+    get_or_head(head, BucketName, Key, Options, Config).
+
 -spec get_object(string(), string()) -> proplist() | no_return().
 
 get_object(BucketName, Key) ->
@@ -759,6 +787,9 @@ get_object(BucketName, Key, Options) ->
 -spec get_object(string(), string(), proplist(), aws_config()) -> proplist() | no_return().
 
 get_object(BucketName, Key, Options, Config) ->
+    get_or_head(get, BucketName, Key, Options, Config).
+
+get_or_head(Method, BucketName, Key, Options, Config) ->
     RequestHeaders = [{"Range", proplists:get_value(range, Options)},
                       {"If-Modified-Since", proplists:get_value(if_modified_since, Options)},
                       {"If-Unmodified-Since", proplists:get_value(if_unmodified_since, Options)},
@@ -771,7 +802,7 @@ get_object(BucketName, Key, Options, Config) ->
                       undefined -> "";
                       Version   -> ["versionId=", Version]
                   end,
-    {Headers, Body} = s3_request(Config, get, BucketName, [$/|Key], Subresource, [], <<>>, RequestHeaders),
+    {Headers, Body} = s3_request(Config, Method, BucketName, [$/|Key], Subresource, [], <<>>, RequestHeaders),
     [{last_modified, proplists:get_value("last-modified", Headers)},
      {etag, proplists:get_value("etag", Headers)},
      {content_length, proplists:get_value("content-length", Headers)},
@@ -842,10 +873,17 @@ get_object_metadata(BucketName, Key, Options, Config) ->
      {content_type, proplists:get_value("content-type", Headers)},
      {content_encoding, proplists:get_value("content-encoding", Headers)},
      {delete_marker, list_to_existing_atom(proplists:get_value("x-amz-delete-marker", Headers, "false"))},
+     {replication_status, decode_replication_status(proplists:get_value("x-amz-replication-status", Headers))},
      {version_id, proplists:get_value("x-amz-version-id", Headers, "false")}|extract_metadata(Headers)].
 
 extract_metadata(Headers) ->
     [{Key, Value} || {Key = "x-amz-meta-" ++ _, Value} <- Headers].
+
+decode_replication_status(undefined) -> undefined;
+decode_replication_status("PENDING") -> pending;
+decode_replication_status("COMPLETED") -> completed;
+decode_replication_status("FAILED") -> failed;
+decode_replication_status("REPLICA") -> replica.
 
 -spec get_object_torrent(string(), string()) -> proplist() | no_return().
 
@@ -1456,6 +1494,99 @@ inv_key_to_name(bucket) ->                   'Bucket';
 inv_key_to_name(prefix) ->                   'Prefix';
 inv_key_to_name(field) ->                    'Field'.
 
+%% @doc
+%% S3 API:
+%% https://docs.aws.amazon.com/AmazonS3/latest/API/RESTBucketPUTencryption.html
+%%
+%% `
+%% ok = erlcloud_s3:put_bucket_encryption("bucket-name",
+%%                                        "aws:kms",
+%%                                        "arn:aws:kms:us-east-1:1234/example").
+%% '
+%%
+-spec put_bucket_encryption(string(), string()) -> ok | {error, any()}.
+put_bucket_encryption(BucketName, SSEAlgorithm) ->
+    put_bucket_encryption(BucketName, SSEAlgorithm, undefined, default_config()).
+
+-spec put_bucket_encryption(string(), string(), string() | aws_config()) ->
+    ok | {error, any()}.
+put_bucket_encryption(BucketName, SSEAlgorithm, KMSMasterKeyId)
+  when is_list(KMSMasterKeyId) ->
+    Config = default_config(),
+    put_bucket_encryption(BucketName, SSEAlgorithm, KMSMasterKeyId, Config);
+put_bucket_encryption(BucketName, SSEAlgorithm, Config)
+  when is_record(Config, aws_config) ->
+    put_bucket_encryption(BucketName, SSEAlgorithm, undefined, Config).
+
+-spec put_bucket_encryption(string(), string(), string() | undefined,
+                            aws_config()) ->
+    ok | {error, any()}.
+put_bucket_encryption(BucketName, SSEAlgorithm, KMSMasterKeyId, Config) ->
+    ApplySSEOPts = build_apply_sse_opts(SSEAlgorithm, KMSMasterKeyId),
+    XML = {
+        'ApplyServerSideEncryptionByDefault',
+        [{'xmlns', ?XMLNS_S3}],
+        [{'Rule', [
+            {'ApplyServerSideEncryptionByDefault', ApplySSEOPts}
+        ]}]
+    },
+    Attrs = [{prolog, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"}],
+    Data  = list_to_binary(xmerl:export_simple([XML], xmerl_xml, Attrs)),
+    s3_xml_request2(Config, put, BucketName, "/", "encryption", [], Data, []).
+
+build_apply_sse_opts(SSEAlgorithm, undefined) ->
+    [{'SSEAlgorithm', [SSEAlgorithm]}];
+build_apply_sse_opts(SSEAlgorithm, KMSMasterKeyId) ->
+    [{'SSEAlgorithm',   [SSEAlgorithm]},
+     {'KMSMasterKeyID', [KMSMasterKeyId]}].
+
+%% @doc
+%% S3 API:
+%% https://docs.aws.amazon.com/AmazonS3/latest/API/RESTBucketGETencryption.html
+%%
+%% `
+%% {ok, [{sse_algorithm,     "AES256"},
+%%       {kms_master_key_id, undefined}]} = erlcloud_s3:get_bucket_encryption("bucket-name").
+%% '
+%%
+-spec get_bucket_encryption(string()) ->
+    {ok, proplists:proplist()} | {error, any()}.
+get_bucket_encryption(BucketName) ->
+    get_bucket_encryption(BucketName, default_config()).
+
+-spec get_bucket_encryption(string(), aws_config()) ->
+    {ok, proplists:proplist()} | {error, any()}.
+get_bucket_encryption(BucketName, Config) ->
+    case s3_xml_request2(Config, get, BucketName, "/", "encryption", [], <<>>, []) of
+        {ok, XML} ->
+            XPath = "/ServerSideEncryptionConfiguration"
+                    "/Rule"
+                    "/ApplyServerSideEncryptionByDefault",
+            Algorithm = XPath ++ "/SSEAlgorithm",
+            KMSKey    = XPath ++ "/KMSMasterKeyID",
+            {ok, [
+                {sse_algorithm,     erlcloud_xml:get_text(Algorithm, XML)},
+                {kms_master_key_id, erlcloud_xml:get_text(KMSKey, XML, undefined)}
+            ]};
+        Error ->
+            Error
+    end.
+
+%% @doc
+%% S3 API:
+%% https://docs.aws.amazon.com/AmazonS3/latest/API/RESTBucketDELETEencryption.html
+%%
+%% `
+%% ok = erlcloud_s3:delete_bucket_encryption("bucket-name").
+%% '
+%%
+-spec delete_bucket_encryption(string()) -> ok | {error, any()}.
+delete_bucket_encryption(BucketName) ->
+    delete_bucket_encryption(BucketName, default_config()).
+
+-spec delete_bucket_encryption(string(), aws_config()) -> ok | {error, any()}.
+delete_bucket_encryption(BucketName, Config) ->
+    s3_xml_request2(Config, delete, BucketName, "/", "encryption", [], <<>>, []).
 
 %% takes an S3 bucket notification configuration and creates an xmerl simple
 %% form out of it.
@@ -1596,6 +1727,7 @@ s3_request2(Config, Method, Bucket, Path, Subresource, Params, POSTData, Headers
 
 s3_xml_request2(Config, Method, Host, Path, Subresource, Params, POSTData, Headers) ->
     case s3_request2(Config, Method, Host, Path, Subresource, Params, POSTData, Headers) of
+        {ok, {_Headers, <<>>}} -> ok;
         {ok, {_Headers, Body}} ->
             XML = element(1,xmerl_scan:string(binary_to_list(Body))),
             case XML of
